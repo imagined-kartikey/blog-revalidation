@@ -51,6 +51,8 @@ async function verifyGhostSignature(req: NextRequest, rawBody: string): Promise<
 
 // ─── Route Handler ──────────────────────────────────────────────────────────
 
+import { revalidatePath } from "next/cache";
+
 export async function POST(req: NextRequest) {
   try {
     // 1. Get raw body for crypto verification
@@ -62,9 +64,13 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Invalid signature" }, { status: 401 });
     }
 
-    // 3. Trigger SWR Cache Invalidation via revalidateTag
+    // 3. Trigger SWR Cache Invalidation via revalidateTag and revalidatePath
+    // In Next.js 16, "max" or "updateTag" is required as the second argument.
     // We tagged all our fetch requests in lib/ghost.ts with 'posts'
-    revalidateTag('posts', "max");
+    revalidateTag('posts', 'max');
+    
+    // Explicitly revalidate the routes to ensure Vercel Edge Cache purges the HTML
+    revalidatePath('/', 'layout');
 
     // Return success
     return NextResponse.json({ revalidated: true, now: Date.now() });
