@@ -76,7 +76,11 @@ function ghostFetch<T>(endpoint: string, params: Record<string, string> = {}): P
  */
 export async function getPosts(limit = 20): Promise<GhostPost[]> {
   "use cache";
-  cacheLife("hours");
+  cacheLife({
+    stale: 0,         // Don't cache in the client router (fixes 5-minute lag)
+    revalidate: 3600, // Server cache background revalidation (1 hour)
+    expire: 86400,    // Server cache maximum lifespan (1 day)
+  });
   cacheTag("posts");
 
   const data = await ghostFetch<GhostResponse<GhostPost>>("posts", {
@@ -95,7 +99,11 @@ export async function getPosts(limit = 20): Promise<GhostPost[]> {
  */
 export async function getPost(slug: string): Promise<GhostPost | null> {
   "use cache";
-  cacheLife("hours");
+  cacheLife({
+    stale: 0,
+    revalidate: 3600,
+    expire: 86400,
+  });
   cacheTag("posts", `post-${slug}`);
 
   const data = await ghostFetch<GhostResponse<GhostPost>>(`posts/slug/${slug}`, {
@@ -111,7 +119,11 @@ export async function getPost(slug: string): Promise<GhostPost | null> {
  */
 export async function getAllPostSlugs(): Promise<string[]> {
   "use cache";
-  cacheLife("hours");
+  cacheLife({
+    stale: 0,
+    revalidate: 3600,
+    expire: 86400,
+  });
   cacheTag("posts");
 
   const data = await ghostFetch<GhostResponse<{ slug: string }>>("posts", {
