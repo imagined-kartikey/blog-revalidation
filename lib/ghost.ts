@@ -1,3 +1,5 @@
+import { cacheLife, cacheTag } from 'next/cache';
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface GhostPost {
@@ -36,81 +38,81 @@ export interface GhostAuthor {
 
 interface GhostResponse<T> {
   posts?: T[];
-  meta?: {
-    pagination: {
-      total: number;
-      pages: number;
-      page: number;
-      limit: number;
-    };
-  };
 }
 
-// ─── Config ───────────────────────────────────────────────────────────────────
+// ─── Fetch helper ─────────────────────────────────────────────────────────────
 
 const GHOST_URL = process.env.GHOST_URL!;
 const GHOST_KEY = process.env.GHOST_KEY!;
-const GHOST_VERSION = "v5.0";
 
-function ghostFetch<T>(endpoint: string, params: Record<string, string> = {}): Promise<T> {
+async function ghostFetch<T>(
+  endpoint: string,
+  params: Record<string, string> = {}
+): Promise<T> {
   const url = new URL(`${GHOST_URL}/ghost/api/content/${endpoint}/`);
-  url.searchParams.set("key", GHOST_KEY);
+  url.searchParams.set('key', GHOST_KEY);
   for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
 
-  return fetch(url.toString(), {
-    headers: { "Accept-Version": GHOST_VERSION },
-  }).then((res) => {
-    if (!res.ok) throw new Error(`Ghost API error: ${res.status} ${res.statusText}`);
-    return res.json() as Promise<T>;
+  const res = await fetch(url.toString(), {
+    headers: { 'Accept-Version': 'v5.0' },
   });
+
+  if (!res.ok) {
+    throw new Error(`Ghost API error ${res.status}: ${res.statusText}`);
+  }
+
+  return res.json() as Promise<T>;
 }
 
-// ─── Cached Data Fetchers ─────────────────────────────────────────────────────
+// ─── Cached data functions ────────────────────────────────────────────────────
+//
+// Pattern per Next.js 16 docs (cacheComponents: true):
+//   'use cache'   → cache this function's return value on the server
+//   cacheLife()   → time-based fallback (SWR: serve stale, refresh in bg)
+//   cacheTag()    → tag entries so revalidateTag('posts', 'max') can purge them
+//
+// On-demand invalidation flow:
+//   Ghost event → POST /api/revalidate → revalidateTag('posts', 'max')
+//   → Next request serves fresh data from Ghost in the background
+//
 
-/**
- * Fetch all published posts from Ghost.
- * Uses "use cache" directive which automatically caches the result.
- */
 export async function getPosts(limit = 20): Promise<GhostPost[]> {
-  "use cache";
+  'use cache';
+  cacheLife('hours'); // stale: 5m | revalidate: 1h | expire: 1d
+  cacheTag('posts');  // <-- matches revalidateTag('posts', 'max') in webhook
 
-  const data = await ghostFetch<GhostResponse<GhostPost>>("posts", {
+  const data = await ghostFetch<GhostResponse<GhostPost>>('posts', {
     limit: String(limit),
-    include: "tags,authors",
-    fields:
-      "id,uuid,title,slug,excerpt,feature_image,feature_image_alt,published_at,reading_time,url,meta_title,meta_description",
+    include: 'tags,authors',
+    fields: 'id,uuid,title,slug,excerpt,feature_image,feature_image_alt,published_at,reading_time,url,meta_title,meta_description',
   });
 
-  console.log("[Ghost] Fetching posts list");
+  console.log(`[Ghost] getPosts → ${data.posts?.length ?? 0} posts`);
   return data.posts ?? [];
 }
 
-/**
- * Fetch a single post by slug from Ghost.
- * Uses "use cache" directive for automatic caching.
- */
 export async function getPost(slug: string): Promise<GhostPost | null> {
-  "use cache";
+  'use cache';
+  cacheLife('hours');
+  cacheTag('posts', `post-${slug}`); // broad + narrow tags both tagged
 
   const data = await ghostFetch<GhostResponse<GhostPost>>(`posts/slug/${slug}`, {
-    include: "tags,authors",
+    include: 'tags,authors',
   });
 
-  console.log(`[Ghost] Fetching post: ${slug}`);
+  console.log(`[Ghost] getPost(${slug}) → ${data.posts?.[0] ? 'found' : 'not found'}`);
   return data.posts?.[0] ?? null;
 }
 
-/**
- * Fetch all post slugs — used by generateStaticParams.
- */
 export async function getAllPostSlugs(): Promise<string[]> {
-  "use cache";
+  'use cache';
+  cacheLife('hours');
+  cacheTag('posts');
 
-  const data = await ghostFetch<GhostResponse<{ slug: string }>>("posts", {
-    limit: "all",
-    fields: "slug",
+  const data = await ghostFetch<GhostResponse<{ slug: string }>>('posts', {
+    limit: 'all',
+    fields: 'slug',
   });
 
-  console.log(`[Ghost] Fetching all post slugs`);
   return (data.posts ?? []).map((p) => p.slug);
 }
