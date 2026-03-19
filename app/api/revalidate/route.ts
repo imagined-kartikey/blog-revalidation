@@ -1,106 +1,68 @@
-import crypto from "crypto";
-import { revalidatePath, revalidateTag } from "next/cache";
-import { NextRequest, NextResponse } from "next/server";
-import { CACHE_TAG_POSTS, postTag } from "@/lib/ghost";
+import crypto from 'crypto';
+import { revalidatePath } from 'next/cache';
 
-interface GhostWebhookPayload {
-  post?: {
-    current?: { slug?: string };
-    previous?: { slug?: string };
-  };
-}
+// Mirrors the Vercel official on-demand ISR webhook pattern:
+// https://github.com/vercel/on-demand-isr/blob/main/app/api/webhook/route.ts
+//
+// Ghost signs webhooks with HMAC-SHA256 over the RAW BODY only.
+// The timestamp `t` in the X-Ghost-Signature header is for replay-attack
+// prevention only — it is NOT part of the hash input.
+//
+// Header format:  X-Ghost-Signature: sha256=<hex>, t=<unix_ms>
 
-export async function POST(req: NextRequest) {
+export async function POST(request: Request) {
   try {
-    const rawBody = await req.text();
-    const SECRET = process.env.GHOST_WEBHOOK_SECRET;
+    const text = await request.text();
 
-    if (!SECRET) {
-      console.error("[Ghost Webhook] GHOST_WEBHOOK_SECRET is not set.");
-      return NextResponse.json({ error: "Webhook secret not configured" }, { status: 500 });
-    }
+    const signature = crypto
+      .createHmac('sha256', process.env.GHOST_WEBHOOK_SECRET || '')
+      .update(text)
+      .digest('hex');
 
-    // Ghost sends: X-Ghost-Signature: sha256=<hash>, t=<timestamp>
-    const signatureHeader = req.headers.get("x-ghost-signature");
-    if (!signatureHeader) {
-      return NextResponse.json({ error: "Missing x-ghost-signature header" }, { status: 401 });
-    }
+    const signatureHeader = request.headers.get('x-ghost-signature') || '';
 
-    // Extract the hash and timestamp parts
-    const hashMatch = signatureHeader.match(/sha256=([a-f0-9]+)/);
-    const tsMatch = signatureHeader.match(/t=(\d+)/);
+    // Extract sha256=... part from the header
+    const receivedSig = signatureHeader.match(/sha256=([a-f0-9]+)/)?.[1] ?? '';
 
-    if (!hashMatch || !tsMatch) {
-      return NextResponse.json({ error: "Invalid signature format" }, { status: 401 });
-    }
-
-    const receivedHash = hashMatch[1];
-    const timestamp = tsMatch[1];
-
-    // Replay attack guard — reject webhooks older than 5 minutes
-    const ageMs = Date.now() - parseInt(timestamp, 10);
-    if (ageMs > 5 * 60 * 1000) {
-      console.warn("[Ghost Webhook] Rejected stale webhook (replay attack?)");
-      return NextResponse.json({ error: "Webhook timestamp too old" }, { status: 401 });
-    }
-
-    // Ghost computes HMAC-SHA256 over body+timestamp concatenated
-    const expectedHash = crypto
-      .createHmac("sha256", SECRET)
-      .update(rawBody + timestamp)
-      .digest("hex");
-
-    const trusted = Buffer.from(expectedHash, "hex");
-    const untrusted = Buffer.from(receivedHash, "hex");
+    const trusted = Buffer.from(`sha256=${signature}`, 'ascii');
+    const untrusted = Buffer.from(`sha256=${receivedSig}`, 'ascii');
 
     if (
       trusted.length !== untrusted.length ||
       !crypto.timingSafeEqual(trusted, untrusted)
     ) {
-      console.log("[Ghost Webhook] Signature mismatch — rejected.");
-      return NextResponse.json({ error: "Invalid signature" }, { status: 401 });
+      console.log('[Ghost Webhook] Invalid signature.');
+      return new Response('Invalid signature.', { status: 400 });
     }
 
-    // Parse slug from payload (may be absent for ping events)
-    let payload: GhostWebhookPayload = {};
+    // Parse slugs from payload so we can revalidate the specific post page too
+    let currentSlug: string | undefined;
+    let previousSlug: string | undefined;
     try {
-      payload = JSON.parse(rawBody) as GhostWebhookPayload;
+      const payload = JSON.parse(text);
+      currentSlug = payload.post?.current?.slug;
+      previousSlug = payload.post?.previous?.slug;
     } catch {
-      // Some Ghost ping events send empty / non-JSON bodies — that's fine
+      // Not all Ghost events have a JSON body — continue anyway
     }
 
-    const currentSlug = payload.post?.current?.slug;
-    const previousSlug = payload.post?.previous?.slug;
+    // Revalidate the blog listing
+    console.log('[Ghost Webhook] Revalidating /blog');
+    revalidatePath('/blog');
 
-    // ── Cache Invalidation ───────────────────────────────────────────────────
-    //
-    // We use the SAME tag constants exported from lib/ghost.ts so there can
-    // never be a mismatch between what was tagged and what gets revalidated.
-    //
-    // revalidateTag(tag, 'max') = SWR: serve stale immediately, regenerate in background.
-    // This matches cacheLife({ stale: 0, revalidate: 3600 }) in ghost.ts.
-
-    console.log(`[Ghost Webhook] Invalidating tag: ${CACHE_TAG_POSTS}`);
-    revalidateTag(CACHE_TAG_POSTS, "max");
-
-    // Also invalidate any per-slug tags
+    // Revalidate the specific post page(s)
     if (currentSlug) {
-      console.log(`[Ghost Webhook] Invalidating tag: ${postTag(currentSlug)}`);
-      revalidateTag(postTag(currentSlug), "max");
+      console.log(`[Ghost Webhook] Revalidating /blog/${currentSlug}`);
+      revalidatePath(`/blog/${currentSlug}`);
     }
     if (previousSlug && previousSlug !== currentSlug) {
-      console.log(`[Ghost Webhook] Invalidating tag: ${postTag(previousSlug)}`);
-      revalidateTag(postTag(previousSlug), "max");
+      console.log(`[Ghost Webhook] Revalidating /blog/${previousSlug}`);
+      revalidatePath(`/blog/${previousSlug}`);
     }
-
-    // Belt-and-suspenders: also revalidate by path so static HTML on the
-    // Vercel CDN edge is purged as well (belt-and-suspenders approach).
-    revalidatePath("/blog", "layout");
-
-    console.log("[Ghost Webhook] Revalidation complete.");
-    return NextResponse.json({ revalidated: true, at: new Date().toISOString() });
   } catch (error) {
-    console.error("[Ghost Webhook] Error:", error);
-    return NextResponse.json({ error: "Internal error" }, { status: 500 });
+    const msg = error instanceof Error ? error.message : String(error);
+    return new Response(`Webhook error: ${msg}`, { status: 400 });
   }
+
+  return new Response('Success!', { status: 200 });
 }
