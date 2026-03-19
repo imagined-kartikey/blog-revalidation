@@ -67,21 +67,37 @@ function ghostFetch<T>(endpoint: string, params: Record<string, string> = {}): P
   });
 }
 
+// ─── Cache Tag Constants ───────────────────────────────────────────────────────
+//
+// IMPORTANT: these must match exactly what is passed to revalidateTag() in
+// app/api/revalidate/route.ts — a mismatch means the webhook fires but nothing updates.
+//
+export const CACHE_TAG_POSTS = "posts";
+export function postTag(slug: string) {
+  return `post-${slug}`;
+}
+
 // ─── Cached Data Fetchers ─────────────────────────────────────────────────────
 
 /**
- * Fetch latest posts from Ghost.
- * Cached with SWR: stale for up to 1 hour, revalidates in the background.
- * Tagged 'posts' so Ghost webhooks can invalidate on-demand.
+ * Fetch all published posts from Ghost.
+ *
+ * "use cache" stores the result on the server.
+ * cacheLife: stale=0 prevents the Next.js App Router from holding stale
+ *   snapshots in the browser for 5 minutes — without this, webhooks clear the
+ *   server cache but normal page refreshes still hit the browser's own router cache.
+ *
+ * Tagged with CACHE_TAG_POSTS ('posts') so a single revalidateTag('posts', 'max')
+ * call from the Ghost webhook purges this AND getAllPostSlugs simultaneously.
  */
 export async function getPosts(limit = 20): Promise<GhostPost[]> {
   "use cache";
   cacheLife({
-    stale: 0,         // Don't cache in the client router (fixes 5-minute lag)
-    revalidate: 3600, // Server cache background revalidation (1 hour)
-    expire: 86400,    // Server cache maximum lifespan (1 day)
+    stale: 0,         // Never serve stale from the browser Router Cache
+    revalidate: 3600, // Regenerate on the server after 1 hour (SWR)
+    expire: 86400,    // Drop the server cache entry after 1 day of no traffic
   });
-  cacheTag("posts");
+  cacheTag(CACHE_TAG_POSTS);
 
   const data = await ghostFetch<GhostResponse<GhostPost>>("posts", {
     limit: String(limit),
@@ -95,7 +111,9 @@ export async function getPosts(limit = 20): Promise<GhostPost[]> {
 
 /**
  * Fetch a single post by slug from Ghost.
- * Cached: stale for up to 1 hour, tagged 'posts' AND 'post-{slug}'.
+ *
+ * Tagged with both CACHE_TAG_POSTS ('posts') AND a per-slug tag ('post-{slug}').
+ * The webhook always invalidates the broad 'posts' tag, which covers this too.
  */
 export async function getPost(slug: string): Promise<GhostPost | null> {
   "use cache";
@@ -104,7 +122,7 @@ export async function getPost(slug: string): Promise<GhostPost | null> {
     revalidate: 3600,
     expire: 86400,
   });
-  cacheTag("posts", `post-${slug}`);
+  cacheTag(CACHE_TAG_POSTS, postTag(slug));
 
   const data = await ghostFetch<GhostResponse<GhostPost>>(`posts/slug/${slug}`, {
     include: "tags,authors",
@@ -114,8 +132,8 @@ export async function getPost(slug: string): Promise<GhostPost | null> {
 }
 
 /**
- * Fetch all post slugs — used for generateStaticParams.
- * Also cached + tagged so revalidation can flush this too.
+ * Fetch all post slugs — used by generateStaticParams.
+ * Also tagged with CACHE_TAG_POSTS so the same webhook purges this too.
  */
 export async function getAllPostSlugs(): Promise<string[]> {
   "use cache";
@@ -124,7 +142,7 @@ export async function getAllPostSlugs(): Promise<string[]> {
     revalidate: 3600,
     expire: 86400,
   });
-  cacheTag("posts");
+  cacheTag(CACHE_TAG_POSTS);
 
   const data = await ghostFetch<GhostResponse<{ slug: string }>>("posts", {
     limit: "all",
