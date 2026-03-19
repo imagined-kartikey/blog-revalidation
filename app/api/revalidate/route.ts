@@ -1,68 +1,88 @@
-import crypto from 'crypto';
-import { revalidatePath } from 'next/cache';
+import crypto from "crypto";
+import { revalidatePath } from "next/cache";
+import { NextRequest, NextResponse } from "next/server";
 
-// Mirrors the Vercel official on-demand ISR webhook pattern:
-// https://github.com/vercel/on-demand-isr/blob/main/app/api/webhook/route.ts
-//
-// Ghost signs webhooks with HMAC-SHA256 over the RAW BODY only.
-// The timestamp `t` in the X-Ghost-Signature header is for replay-attack
-// prevention only — it is NOT part of the hash input.
-//
-// Header format:  X-Ghost-Signature: sha256=<hex>, t=<unix_ms>
-
-export async function POST(request: Request) {
+export async function POST(req: NextRequest) {
   try {
-    const text = await request.text();
+    const rawBody = await req.text();
+    const SECRET = process.env.GHOST_WEBHOOK_SECRET;
 
-    const signature = crypto
-      .createHmac('sha256', process.env.GHOST_WEBHOOK_SECRET || '')
-      .update(text)
-      .digest('hex');
+    if (!SECRET) {
+      console.error("[Ghost Webhook] GHOST_WEBHOOK_SECRET is not set.");
+      return NextResponse.json({ error: "Webhook secret not configured" }, { status: 500 });
+    }
 
-    const signatureHeader = request.headers.get('x-ghost-signature') || '';
+    // Ghost sends: X-Ghost-Signature: sha256=<hash>, t=<timestamp>
+    const signatureHeader = req.headers.get("x-ghost-signature");
+    if (!signatureHeader) {
+      return NextResponse.json({ error: "Missing x-ghost-signature header" }, { status: 401 });
+    }
 
-    // Extract sha256=... part from the header
-    const receivedSig = signatureHeader.match(/sha256=([a-f0-9]+)/)?.[1] ?? '';
+    // Extract the hash and timestamp parts
+    const hashMatch = signatureHeader.match(/sha256=([a-f0-9]+)/);
+    const tsMatch = signatureHeader.match(/t=(\d+)/);
 
-    const trusted = Buffer.from(`sha256=${signature}`, 'ascii');
-    const untrusted = Buffer.from(`sha256=${receivedSig}`, 'ascii');
+    if (!hashMatch || !tsMatch) {
+      return NextResponse.json({ error: "Invalid signature format" }, { status: 401 });
+    }
+
+    const receivedHash = hashMatch[1];
+    const timestamp = tsMatch[1];
+
+    // Replay attack guard — reject webhooks older than 5 minutes
+    const ageMs = Date.now() - parseInt(timestamp, 10);
+    if (ageMs > 5 * 60 * 1000) {
+      console.warn("[Ghost Webhook] Rejected stale webhook (replay attack?)");
+      return NextResponse.json({ error: "Webhook timestamp too old" }, { status: 401 });
+    }
+
+    // Ghost computes HMAC-SHA256 over body+timestamp concatenated
+    const expectedHash = crypto
+      .createHmac("sha256", SECRET)
+      .update(rawBody + timestamp)
+      .digest("hex");
+
+    const trusted = Buffer.from(expectedHash, "hex");
+    const untrusted = Buffer.from(receivedHash, "hex");
 
     if (
       trusted.length !== untrusted.length ||
       !crypto.timingSafeEqual(trusted, untrusted)
     ) {
-      console.log('[Ghost Webhook] Invalid signature.');
-      return new Response('Invalid signature.', { status: 400 });
+      console.log("[Ghost Webhook] Signature mismatch — rejected.");
+      return NextResponse.json({ error: "Invalid signature" }, { status: 401 });
     }
 
-    // Parse slugs from payload so we can revalidate the specific post page too
-    let currentSlug: string | undefined;
-    let previousSlug: string | undefined;
+    // Parse slug from payload (may be absent for ping events)
+    let payload: any = {};
     try {
-      const payload = JSON.parse(text);
-      currentSlug = payload.post?.current?.slug;
-      previousSlug = payload.post?.previous?.slug;
+      payload = JSON.parse(rawBody);
     } catch {
-      // Not all Ghost events have a JSON body — continue anyway
+      // Some Ghost ping events send empty / non-JSON bodies — that's fine
     }
 
-    // Revalidate the blog listing
-    console.log('[Ghost Webhook] Revalidating /blog');
-    revalidatePath('/blog');
+    const currentSlug = payload.post?.current?.slug;
 
-    // Revalidate the specific post page(s)
+    // ── Cache Invalidation ───────────────────────────────────────────────────
+    //
+    // Use revalidatePath() to purge the Next.js cache. This is the proven pattern
+    // from Vercel's on-demand-isr example and works reliably with webhooks.
+
+    console.log("[Ghost Webhook] Revalidating /blog");
+    revalidatePath("/blog");
+
     if (currentSlug) {
       console.log(`[Ghost Webhook] Revalidating /blog/${currentSlug}`);
       revalidatePath(`/blog/${currentSlug}`);
     }
-    if (previousSlug && previousSlug !== currentSlug) {
-      console.log(`[Ghost Webhook] Revalidating /blog/${previousSlug}`);
-      revalidatePath(`/blog/${previousSlug}`);
-    }
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    return new Response(`Webhook error: ${msg}`, { status: 400 });
-  }
 
-  return new Response('Success!', { status: 200 });
+    console.log("[Ghost Webhook] Success!");
+    return NextResponse.json({ 
+      revalidated: true, 
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error("[Ghost Webhook] Error:", error);
+    return NextResponse.json({ error: "Internal error" }, { status: 500 });
+  }
 }

@@ -1,5 +1,3 @@
-import 'server-only';
-
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface GhostPost {
@@ -38,23 +36,29 @@ export interface GhostAuthor {
 
 interface GhostResponse<T> {
   posts?: T[];
+  meta?: {
+    pagination: {
+      total: number;
+      pages: number;
+      page: number;
+      limit: number;
+    };
+  };
 }
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
 const GHOST_URL = process.env.GHOST_URL!;
 const GHOST_KEY = process.env.GHOST_KEY!;
-const GHOST_VERSION = 'v5.0';
+const GHOST_VERSION = "v5.0";
 
 function ghostFetch<T>(endpoint: string, params: Record<string, string> = {}): Promise<T> {
   const url = new URL(`${GHOST_URL}/ghost/api/content/${endpoint}/`);
-  url.searchParams.set('key', GHOST_KEY);
+  url.searchParams.set("key", GHOST_KEY);
   for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
 
-  console.log(`[Ghost] Fetching: ${endpoint}`);
-
   return fetch(url.toString(), {
-    headers: { 'Accept-Version': GHOST_VERSION },
+    headers: { "Accept-Version": GHOST_VERSION },
   }).then((res) => {
     if (!res.ok) throw new Error(`Ghost API error: ${res.status} ${res.statusText}`);
     return res.json() as Promise<T>;
@@ -62,50 +66,51 @@ function ghostFetch<T>(endpoint: string, params: Record<string, string> = {}): P
 }
 
 // ─── Cached Data Fetchers ─────────────────────────────────────────────────────
-//
-// Pattern from Vercel's official on-demand ISR example:
-//   https://github.com/vercel/on-demand-isr
-//
-// The `'use cache'` directive caches the function's return value on the server.
-// On-demand invalidation is done via revalidatePath() in the webhook route —
-// which forces ALL cached functions that contributed to that path to be
-// re-executed on the very next request.
-//
-// We intentionally do NOT use cacheTag or cacheLife here to keep it simple
-// and matching the proven Vercel pattern.
 
+/**
+ * Fetch all published posts from Ghost.
+ * Uses "use cache" directive which automatically caches the result.
+ */
 export async function getPosts(limit = 20): Promise<GhostPost[]> {
-  'use cache';
+  "use cache";
 
-  const data = await ghostFetch<GhostResponse<GhostPost>>('posts', {
+  const data = await ghostFetch<GhostResponse<GhostPost>>("posts", {
     limit: String(limit),
-    include: 'tags,authors',
+    include: "tags,authors",
     fields:
-      'id,uuid,title,slug,excerpt,feature_image,feature_image_alt,published_at,reading_time,url,meta_title,meta_description',
+      "id,uuid,title,slug,excerpt,feature_image,feature_image_alt,published_at,reading_time,url,meta_title,meta_description",
   });
 
-  console.log(`[Ghost] Posts fetched: ${data.posts?.length ?? 0}`);
+  console.log("[Ghost] Fetching posts list");
   return data.posts ?? [];
 }
 
+/**
+ * Fetch a single post by slug from Ghost.
+ * Uses "use cache" directive for automatic caching.
+ */
 export async function getPost(slug: string): Promise<GhostPost | null> {
-  'use cache';
+  "use cache";
 
   const data = await ghostFetch<GhostResponse<GhostPost>>(`posts/slug/${slug}`, {
-    include: 'tags,authors',
+    include: "tags,authors",
   });
 
-  console.log(`[Ghost] Post fetched: ${slug}`);
+  console.log(`[Ghost] Fetching post: ${slug}`);
   return data.posts?.[0] ?? null;
 }
 
+/**
+ * Fetch all post slugs — used by generateStaticParams.
+ */
 export async function getAllPostSlugs(): Promise<string[]> {
-  'use cache';
+  "use cache";
 
-  const data = await ghostFetch<GhostResponse<{ slug: string }>>('posts', {
-    limit: 'all',
-    fields: 'slug',
+  const data = await ghostFetch<GhostResponse<{ slug: string }>>("posts", {
+    limit: "all",
+    fields: "slug",
   });
 
+  console.log(`[Ghost] Fetching all post slugs`);
   return (data.posts ?? []).map((p) => p.slug);
 }
