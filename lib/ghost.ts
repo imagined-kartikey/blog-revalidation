@@ -34,10 +34,14 @@ export interface GhostAuthor {
   slug: string;
   profile_image: string | null;
   bio: string | null;
+  location: string | null;
+  website: string | null;
 }
 
 interface GhostResponse<T> {
   posts?: T[];
+  authors?: T[];
+  tags?: T[];
 }
 
 // ─── Fetch helper ─────────────────────────────────────────────────────────────
@@ -84,7 +88,7 @@ export async function getPosts(limit = 20): Promise<GhostPost[]> {
   const data = await ghostFetch<GhostResponse<GhostPost>>('posts', {
     limit: String(limit),
     include: 'tags,authors',
-    fields: 'id,uuid,title,slug,excerpt,feature_image,feature_image_alt,published_at,reading_time,url,meta_title,meta_description',
+    fields: 'id,uuid,title,slug,excerpt,feature_image,feature_image_alt,published_at,reading_time,url,meta_title,meta_description,html',
   });
 
   console.log(`[Ghost] getPosts → ${data.posts?.length ?? 0} posts`);
@@ -116,3 +120,45 @@ export async function getAllPostSlugs(): Promise<string[]> {
 
   return (data.posts ?? []).map((p) => p.slug);
 }
+
+export async function getAuthors(): Promise<GhostAuthor[]> {
+  'use cache';
+  cacheLife('hours');
+  cacheTag('authors');
+
+  const data = await ghostFetch<GhostResponse<GhostAuthor>>('authors', {
+    limit: 'all',
+    fields: 'id,name,slug,profile_image,bio,website,location',
+  });
+
+  console.log(`[Ghost] getAuthors → ${data.authors?.length ?? 0} authors`);
+  return data.authors ?? [];
+}
+
+export async function getAuthorBySlug(slug: string): Promise<GhostAuthor | null> {
+  'use cache';
+  cacheLife('hours');
+  cacheTag('authors', `author-${slug}`);
+
+  const data = await ghostFetch<GhostResponse<GhostAuthor>>('authors/slug/' + slug);
+
+  console.log(`[Ghost] getAuthorBySlug(${slug}) → ${data.authors?.[0] ? 'found' : 'not found'}`);
+  return data.authors?.[0] ?? null;
+}
+
+export async function getPostsByAuthor(slug: string, limit = 20): Promise<GhostPost[]> {
+  'use cache';
+  cacheLife('hours');
+  cacheTag('posts', `author-${slug}`);
+
+  const data = await ghostFetch<GhostResponse<GhostPost>>('posts', {
+    limit: String(limit),
+    include: 'tags,authors',
+    filter: `author:${slug}`,
+    fields: 'id,uuid,title,slug,excerpt,feature_image,feature_image_alt,published_at,reading_time,url,meta_title,meta_description,html',
+  });
+
+  console.log(`[Ghost] getPostsByAuthor(${slug}) → ${data.posts?.length ?? 0} posts`);
+  return data.posts ?? [];
+}
+
